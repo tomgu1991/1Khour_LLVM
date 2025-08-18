@@ -17,7 +17,24 @@ def fib(x)
 fib(40)
 ```
 
+Language Spec:
 ```
+top ::= definition | external | expression | ';'
+
+definition ::= 'def' prototype expression // 函数定义
+external ::= 'extern' prototype // 外部声明
+toplevelexpr ::= expression
+
+prototype ::= id '(' id* ')' // 函数签名
+
+expression ::= primary binoprhs // 表达式，递归形式
+primary ::= identifierexpr | numberexpr | parenexpr
+binoprhs ::= ('+' primary)* // 二元右侧
+
+identifierexpr ::= identifier | identifier '(' expression* ')'
+numberexpr ::= number
+parenexpr ::= '(' expression ')'
+
 key: def | extern
 identifier: [a-zA-Z][a-zA-Z0-9]*
 Number: [0-9.]+
