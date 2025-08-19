@@ -10,7 +10,11 @@
 static std::string Input;
 static int InputIndex = 0;
 
-// return tokens [0-255] to represent unknown character, otherwise known tokens
+//===----------------------------------------------------------------------===//
+// Lexer
+//===----------------------------------------------------------------------===//
+
+/// return tokens [0-255] to represent unknown character, otherwise known tokens
 enum Token {
     tok_eof = -1,
 
@@ -76,9 +80,13 @@ static int gettok() {
     LastChar = Input[InputIndex++]; // always move LastChar to the next one
     return ThisChar;
 }
-/// end lexer
+//===----------------------------------------------------------------------===//
+// Lexer end
+//===----------------------------------------------------------------------===//
 
-/// parser
+//===----------------------------------------------------------------------===//
+// Parser
+//===----------------------------------------------------------------------===//
 /// 当前的token是什么，一个缓冲
 static int CurTok;
 /// 获取下一个Token是什么，用来触发递归向下的parse
@@ -283,12 +291,158 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     }
     return nullptr;
 }
+//===----------------------------------------------------------------------===//
+// Parser end
+//===----------------------------------------------------------------------===//
+
+
+//===----------------------------------------------------------------------===//
+// Code Generation
+//===----------------------------------------------------------------------===//
+
+static std::unique_ptr<llvm::LLVMContext> TheContext; // 上下文信息，数据结构
+static std::unique_ptr<llvm::Module> TheModule; // 组织函数和全局变量
+static std::unique_ptr<llvm::IRBuilder<>> Builder; // 组织IR指令
+static std::unordered_map<std::string, llvm::Value *> NamedValues; // 记录当前符号表
+
+llvm::Value *LogErrorV(const char *Str) {
+    LogError(Str);
+    return nullptr;
+}
+
+/// 数字，就直接是一个APFloat类型的常量
+llvm::Value *NumberExprAST::codegen() {
+    // LLVM里面常量都是独立、共享的，所以直接get
+    return llvm::ConstantFP::get(*TheContext, llvm::APFloat(this->value));
+}
+
+/// 变量，要判断上下文有没有
+llvm::Value *VariableExprAST::codegen() {
+    llvm::Value *V = NamedValues[this->name];
+    //
+    if (!V)
+        LogErrorV(("Unknown variable name: " + this->name).c_str());
+    return V;
+}
+
+/// 表达式递归的进行就好了，Builder->CreateFAdd方法里面第三个参数就是占位符，重复名字LLVM会自己处理
+llvm::Value *BinaryExprAST::codegen() {
+    llvm::Value *L = LHS->codegen();
+    llvm::Value *R = RHS->codegen();
+    if (!L || !R)
+        return nullptr;
+    switch (Op) {
+        case '+':
+            return Builder->CreateFAdd(L, R, "addtmp");
+        case '-':
+            return Builder->CreateFSub(L, R, "subtmp");
+        case '*':
+            return Builder->CreateFMul(L, R, "multmp");
+        case '<':
+            L = Builder->CreateFCmpULT(L, R, "cmptmp");
+            // Convert bool 0/1 to double 0.0 or 1.0
+            return Builder->CreateUIToFP(L, llvm::Type::getDoubleTy(*TheContext),
+                                         "booltmp");
+        default:
+            return LogErrorV("invalid binary operator");
+    }
+}
+
+/// 处理函数调用
+llvm::Value *CallExprAST::codegen() {
+    // Look up the name in the global module table.
+    llvm::Function *CalleeF = TheModule->getFunction(Callee);
+    if (!CalleeF)
+        return LogErrorV("Unknown function referenced");
+
+    // If argument mismatch error.
+    if (CalleeF->arg_size() != Args.size())
+        return LogErrorV("Incorrect # arguments passed");
+
+    std::vector<llvm::Value *> ArgsV;
+    for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+        ArgsV.push_back(Args[i]->codegen());
+        if (!ArgsV.back())
+            return nullptr;
+    }
+
+    return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+/// 函数签名：就是一个类型表示，所以是返回值+参数类型的组合
+llvm::Function *PrototypeAST::codegen() {
+    // Make the function type:  double(double,double) etc.
+    std::vector<llvm::Type *> Doubles(Args.size(), llvm::Type::getDoubleTy(*TheContext));
+    llvm::FunctionType *FT = llvm::FunctionType::get(llvm::Type::getDoubleTy(*TheContext), Doubles, false);
+
+    // externallinkage表示函数可能是外部的
+    // 同时，这个函数注册到module里面
+    llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, Name, TheModule.get());
+
+    // Set names for all arguments.
+    unsigned Idx = 0;
+    for (auto &Arg: F->args())
+        Arg.setName(Args[Idx++]);
+
+    return F;
+}
+
+llvm::Function *FunctionAST::codegen() {
+    // First, check for an existing function from a previous 'extern' declaration.
+    llvm::Function *TheFunction = TheModule->getFunction(Proto->getName());
+
+    if (!TheFunction)
+        TheFunction = Proto->codegen();
+
+    if (!TheFunction)
+        return nullptr;
+
+    // Create a new basic block to start insertion into.
+    llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
+    Builder->SetInsertPoint(BB);
+
+    // Record the function arguments in the NamedValues map.
+    NamedValues.clear();
+    for (auto &Arg : TheFunction->args())
+        NamedValues[std::string(Arg.getName())] = &Arg;
+
+    if (llvm::Value *RetVal = Body->codegen()) {
+        // Finish off the function.
+        Builder->CreateRet(RetVal);
+
+        // Validate the generated code, checking for consistency.
+        verifyFunction(*TheFunction);
+
+        return TheFunction;
+    }
+
+    // Error reading body, remove function.
+    TheFunction->eraseFromParent();
+    return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// Top-Level parsing and JIT Driver
+//===----------------------------------------------------------------------===//
+
+/// 初始化
+static void InitializeModule() {
+    // Open a new context and module.
+    TheContext = std::make_unique<llvm::LLVMContext>();
+    TheModule = std::make_unique<llvm::Module>("my cool jit", *TheContext);
+
+    // Create a new builder for the module.
+    Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+}
 
 /// 后面就可以用一个驱动来处理parser
 static void HandleDefinition() {
     if (auto R = ParseDefinition()) {
         std::cout << "Parsed a function definition.\n";
         std::cout << R->printToStr() << std::endl;
+        if (auto *FnIR = R->codegen()) {
+            FnIR->print(llvm::errs());
+        }
     } else {
         // Skip token for error recovery.
         getNextToken();
@@ -299,6 +453,9 @@ static void HandleExtern() {
     if (auto R = ParseExtern()) {
         std::cout << "Parsed an extern\n";
         std::cout << R->printToStr() << std::endl;
+        if (auto *FnIR = R->codegen()) {
+            FnIR->print(llvm::errs());
+        }
     } else {
         // Skip token for error recovery.
         getNextToken();
@@ -310,6 +467,11 @@ static void HandleTopLevelExpression() {
     if (auto R = ParseTopLevelExpr()) {
         std::cout << "Parsed a top-level expr\n";
         std::cout << R->printToStr() << std::endl;
+        if (auto *FnIR = R->codegen()) {
+            FnIR->print(llvm::errs());
+            // Remove the anonymous expression.
+            FnIR->eraseFromParent();
+        }
     } else {
         // Skip token for error recovery.
         getNextToken();
@@ -336,17 +498,24 @@ static void MainLoop() {
         }
     }
 }
+//===----------------------------------------------------------------------===//
+// Driver end
+//===----------------------------------------------------------------------===//
 
-/// end parser
 int main() {
     std::cout << "Hello World!" << std::endl;
     // Input = "a + 1 * 4 + defts";
-    Input = "a+1*(45+b*cd)+6*7";
+    // Input = "a+1*(45+b*cd)+6*7";
     // Input = "(45+12)*15";
     // Input = "def add(a b) a + b";
     // Input = "add(1,2+3)";
+    Input = "def squire(a) a*a; def foo(a b) squire(a) + 2*a*b + squire(b);";
     getNextToken(); // 启动
+    // Make the module, which holds all the code.
+    InitializeModule();
     MainLoop();
+    // Print out all of the generated code.
+    TheModule->print(llvm::errs(), nullptr);
     std::cout << "finish" << std::endl;
     return 0;
 }

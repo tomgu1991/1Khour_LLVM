@@ -5,6 +5,18 @@
 #ifndef AST_H
 #define AST_H
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Value.h"
+#include "llvm/IR/Verifier.h"
 #include <string>
 #include <vector>
 
@@ -17,6 +29,7 @@ class ExprAST {
 public:
     virtual ~ExprAST() = default;
     virtual std::string printToStr() = 0;
+    virtual llvm::Value *codegen() = 0;
 };
 
 class NumberExprAST : public ExprAST {
@@ -24,6 +37,7 @@ class NumberExprAST : public ExprAST {
 public:
     NumberExprAST(double value) : value(value) {}
     std::string printToStr() override { return std::to_string(value); }
+    llvm::Value *codegen() override;
 };
 
 class VariableExprAST : public ExprAST {
@@ -31,6 +45,7 @@ class VariableExprAST : public ExprAST {
 public:
     VariableExprAST(std::string name) : name(name) {}
     std::string printToStr() override { return name; }
+    llvm::Value *codegen() override;
 };
 
 class BinaryExprAST : public ExprAST {
@@ -47,6 +62,7 @@ public:
         }
         return R;
     }
+    llvm::Value *codegen() override;
 };
 
 class CallExprAST : public ExprAST {
@@ -61,6 +77,7 @@ public:
             R += E->printToStr() + ", ";
         return "Call: " + Callee + "(" + R + ")";
     }
+    llvm::Value *codegen() override;
 };
 
 /// 函数声明
@@ -76,6 +93,7 @@ public:
             R += E + ", ";
         return Name + "(" + R + ")";
     }
+    llvm::Function *codegen();
 };
 
 /// 函数定义
@@ -88,6 +106,7 @@ public:
     std::string printToStr() {
         return "FunctionDef: " + Proto->printToStr() + "\nBody: " + Body->printToStr();
     }
+    llvm::Function *codegen();
 };
 
 #endif //AST_H
