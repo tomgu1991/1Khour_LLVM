@@ -23,5 +23,5 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(include)
 
 add_executable(Kal_lang main.cpp)
-llvm_map_components_to_libnames(llvm_libs Core Support Analysis)
+llvm_map_components_to_libnames(llvm_libs Core Support Analysis Passes)
 target_link_libraries(Kal_lang ${llvm_libs})

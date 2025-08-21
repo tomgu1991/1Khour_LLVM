@@ -3,6 +3,29 @@
 //
 
 #include "ast.h"
+
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/Reassociate.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -305,6 +328,15 @@ static std::unique_ptr<llvm::Module> TheModule; // 组织函数和全局变量
 static std::unique_ptr<llvm::IRBuilder<>> Builder; // 组织IR指令
 static std::unordered_map<std::string, llvm::Value *> NamedValues; // 记录当前符号表
 
+/// 优化
+static std::unique_ptr<llvm::FunctionPassManager> TheFPM;
+static std::unique_ptr<llvm::LoopAnalysisManager> TheLAM;
+static std::unique_ptr<llvm::FunctionAnalysisManager> TheFAM;
+static std::unique_ptr<llvm::CGSCCAnalysisManager> TheCGAM;
+static std::unique_ptr<llvm::ModuleAnalysisManager> TheMAM;
+static std::unique_ptr<llvm::PassInstrumentationCallbacks> ThePIC;
+static std::unique_ptr<llvm::StandardInstrumentations> TheSI;
+
 llvm::Value *LogErrorV(const char *Str) {
     LogError(Str);
     return nullptr;
@@ -413,6 +445,9 @@ llvm::Function *FunctionAST::codegen() {
         // Validate the generated code, checking for consistency.
         verifyFunction(*TheFunction);
 
+        // Run the optimizer on the function.
+        TheFPM->run(*TheFunction, *TheFAM);
+
         return TheFunction;
     }
 
@@ -426,13 +461,40 @@ llvm::Function *FunctionAST::codegen() {
 //===----------------------------------------------------------------------===//
 
 /// 初始化
-static void InitializeModule() {
+static void InitializeModuleAndManagers() {
     // Open a new context and module.
     TheContext = std::make_unique<llvm::LLVMContext>();
     TheModule = std::make_unique<llvm::Module>("my cool jit", *TheContext);
 
     // Create a new builder for the module.
     Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+
+    // Create new pass and analysis managers. 不同维度的优化
+    TheFPM = std::make_unique<llvm::FunctionPassManager>();
+    TheLAM = std::make_unique<llvm::LoopAnalysisManager>();
+    TheFAM = std::make_unique<llvm::FunctionAnalysisManager>();
+    TheCGAM = std::make_unique<llvm::CGSCCAnalysisManager>();
+    TheMAM = std::make_unique<llvm::ModuleAnalysisManager>();
+    ThePIC = std::make_unique<llvm::PassInstrumentationCallbacks>();
+    TheSI = std::make_unique<llvm::StandardInstrumentations>(*TheContext,
+                                                       /*DebugLogging*/ true);
+    TheSI->registerCallbacks(*ThePIC, TheMAM.get());
+
+    // Add transform passes. transform会更改IR，但是analysis只会分析
+    // Do simple "peephole" optimizations and bit-twiddling optzns.
+    TheFPM->addPass(llvm::InstCombinePass());
+    // Reassociate expressions.
+    TheFPM->addPass(llvm::ReassociatePass());
+    // Eliminate Common SubExpressions.
+    TheFPM->addPass(llvm::GVNPass());
+    // Simplify the control flow graph (deleting unreachable blocks, etc).
+    TheFPM->addPass(llvm::SimplifyCFGPass());
+
+    // Register analysis passes used in these transform passes.
+    llvm::PassBuilder PB;
+    PB.registerModuleAnalyses(*TheMAM);
+    PB.registerFunctionAnalyses(*TheFAM);
+    PB.crossRegisterProxies(*TheLAM, *TheFAM, *TheCGAM, *TheMAM);
 }
 
 /// 后面就可以用一个驱动来处理parser
@@ -506,13 +568,16 @@ int main() {
     std::cout << "Hello World!" << std::endl;
     // Input = "a + 1 * 4 + defts";
     // Input = "a+1*(45+b*cd)+6*7";
-    // Input = "(45+12)*15";
+    // Input = "def foo() (45+12)*15"; //-> 这里会直接优化返回855
     // Input = "def add(a b) a + b";
-    // Input = "add(1,2+3)";
-    Input = "def squire(a) a*a; def foo(a b) squire(a) + 2*a*b + squire(b);";
+    // Input = "add(1,2+3)"; //
+    Input = "def addTwo(a) a+1+1;" // -> 这里不会直接优化：？1+1+a就会
+            "def squire(a) a*a; "
+            "def foo(a b) squire(a) + 2*a*b + squire(b);"
+            "def test(x) (1+2+x)*(x+(1+2));";
     getNextToken(); // 启动
     // Make the module, which holds all the code.
-    InitializeModule();
+    InitializeModuleAndManagers();
     MainLoop();
     // Print out all of the generated code.
     TheModule->print(llvm::errs(), nullptr);
