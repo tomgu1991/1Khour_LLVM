@@ -48,6 +48,11 @@ enum Token {
     // primary
     tok_identifier = -4,
     tok_number = -5,
+
+    // if-expr
+    tok_if = -6,
+    tok_then = -7,
+    tok_else = -8,
 };
 
 static std::string Id; // current id if tok_identifier
@@ -67,12 +72,21 @@ static int gettok() {
         while (isalnum(LastChar = Input[InputIndex++])) {
             Id += LastChar;
         }
-        // special id, def
+        // special id, def, 这里处理keyword
         if (Id == "def") {
             return tok_def;
         }
         if (Id == "extern") {
             return tok_extern;
+        }
+        if (Id == "if") {
+            return tok_if;
+        }
+        if (Id == "then") {
+            return tok_then;
+        }
+        if (Id == "else") {
+            return tok_else;
         }
         return tok_identifier;
     }
@@ -184,6 +198,31 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
     return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// 处理if表达式
+static std::unique_ptr<ExprAST> ParseIfExpr() {
+    getNextToken(); // 跳过if
+    auto Cond = ParseExpression();
+    if (!Cond) return nullptr;
+    if (CurTok != tok_then)
+        return LogError("expected 'then'");
+    getNextToken(); // 跳过then
+    auto Then = ParseExpression();
+    if (!Then)
+        return nullptr;
+
+    if (CurTok != tok_else)
+        return LogError("expected else");
+
+    getNextToken();
+
+    auto Else = ParseExpression();
+    if (!Else)
+        return nullptr;
+
+    return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+                                        std::move(Else));
+}
+
 /// D: 解析一个基础表达式
 /// primary
 ///   ::= identifierexpr C
@@ -199,6 +238,8 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
             return ParseNumberExpr();
         case '(':
             return ParseParenExpr();
+        case tok_if:
+            return ParseIfExpr();
     }
 }
 
@@ -401,6 +442,62 @@ llvm::Value *CallExprAST::codegen() {
     return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
+llvm::Value *IfExprAST::codegen() {
+    llvm::Value *CondV = Cond->codegen();
+    if (!CondV) return nullptr;
+    // 需要将condition转为一个bool
+    CondV = Builder->CreateFCmpONE(CondV, llvm::ConstantFP::get(*TheContext, llvm::APFloat(0.0)), "ifcond");
+
+    // 获得当前的函数
+    llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+
+    // 创建thenbb，并且直接将thenbb加到funciton的最后
+    llvm::BasicBlock *ThenBB = llvm::BasicBlock::Create(*TheContext, "then", TheFunction);
+    llvm::BasicBlock *ElseBB = llvm::BasicBlock::Create(*TheContext, "else");
+    llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "ifcont");
+    // 创建条件分支IR，并且绑定对应的跳转
+    Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+    TheFunction->print(llvm::errs());
+    // thenbb加入到结构中，虽然此时then还是空的，将thenbb设置为Builder的开始位置，那么后面加入的内容就都在ThenBB里面
+    Builder->SetInsertPoint(ThenBB);
+    // 注意，此时builder指向了thenbb，所以then的codegen的上下文已经换了
+    llvm::Value *ThenV = Then->codegen();
+    if (!ThenV)
+        return nullptr;
+
+    Builder->CreateBr(MergeBB);
+    // Codegen of 'Then' can change the current block, update ThenBB for the PHI.
+    // 这里是担心then本身有递归的其他表达式
+    ThenBB = Builder->GetInsertBlock();
+
+    // Emit else block.
+    TheFunction->insert(TheFunction->end(), ElseBB);
+    Builder->SetInsertPoint(ElseBB);
+
+    TheFunction->print(llvm::errs());
+
+    llvm::Value *ElseV = Else->codegen();
+    if (!ElseV)
+        return nullptr;
+
+    Builder->CreateBr(MergeBB);
+    // Codegen of 'Else' can change the current block, update ElseBB for the PHI.
+    ElseBB = Builder->GetInsertBlock();
+
+    // Emit merge block.
+    TheFunction->insert(TheFunction->end(), MergeBB);
+    TheFunction->print(llvm::errs());
+
+    Builder->SetInsertPoint(MergeBB);
+    llvm::PHINode *PN = Builder->CreatePHI(llvm::Type::getDoubleTy(*TheContext), 2, "iftmp");
+
+    PN->addIncoming(ThenV, ThenBB);
+    PN->addIncoming(ElseV, ElseBB);
+
+    TheFunction->print(llvm::errs());
+    return PN;
+}
+
 /// 函数签名：就是一个类型表示，所以是返回值+参数类型的组合
 llvm::Function *PrototypeAST::codegen() {
     // Make the function type:  double(double,double) etc.
@@ -574,7 +671,12 @@ int main() {
     Input = "def addTwo(a) a+1+1;" // -> 这里不会直接优化：？1+1+a就会
             "def squire(a) a*a; "
             "def foo(a b) squire(a) + 2*a*b + squire(b);"
-            "def test(x) (1+2+x)*(x+(1+2));";
+            "def test(x) (1+2+x)*(x+(1+2));"
+            "def fib(x) "
+            "   if x < 3 then"
+            "       squire(x)"
+            "   else"
+            "       fib (x-1) + squire(x)";
     getNextToken(); // 启动
     // Make the module, which holds all the code.
     InitializeModuleAndManagers();

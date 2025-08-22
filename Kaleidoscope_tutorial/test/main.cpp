@@ -6,6 +6,7 @@
 extern "C" {
     double foo(double, double);
     double squire(double);
+    double fib(double);
 }
 
 int main(int argc, char **argv) {
@@ -14,5 +15,8 @@ int main(int argc, char **argv) {
     std::cout << squire(x) << std::endl;
     std::cout << squire(y) << std::endl;
     std::cout << foo(x, y) << std::endl;
+    std::cout << squire(x) << std::endl;
+    std::cout << fib(2) << std::endl;
+    std::cout << fib(5) << std::endl; // 5*5 + 4*4 + 3*3 + 2*2 = 54
     return 0;
 }

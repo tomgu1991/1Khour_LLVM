@@ -27,9 +27,10 @@ toplevelexpr ::= expression
 
 prototype ::= id '(' id* ')' // 函数签名
 
-expression ::= primary binoprhs // 表达式，递归形式
+expression ::= primary binoprhs | ifexpr// 表达式，递归形式
 primary ::= identifierexpr | numberexpr | parenexpr
 binoprhs ::= ('+' primary)* // 二元右侧
+ifexpr ::= 'if' expression 'then' expression 'else' expression
 
 identifierexpr ::= identifier | identifier '(' expression* ')'
 numberexpr ::= number
