@@ -14,12 +14,18 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
@@ -856,7 +862,68 @@ int main() {
     InitializeModuleAndManagers();
     MainLoop();
     // Print out all of the generated code.
+    std::cout << "Dump: IR" << std::endl;
     TheModule->print(llvm::errs(), nullptr);
+
+    // --- gen object file --- //
+    // Initialize the target registry etc.
+    // llvm::InitializeAllTargetInfos();
+    // llvm::InitializeAllTargets();
+    // llvm::InitializeAllTargetMCs();
+    // llvm::InitializeAllAsmParsers();
+    // llvm::InitializeAllAsmPrinters();
+    // LLVMInitializeARMTarget();
+    // LLVMInitializeARMTargetInfo();
+    // LLVMInitializeARMTargetMC();
+    // LLVMInitializeARMAsmParser();
+    // LLVMInitializeARMAsmPrinter();
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+    auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+    TheModule->setTargetTriple(TargetTriple);
+    std::string Error;
+    auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
+
+    // Print an error and exit if we couldn't find the requested target.
+    // This generally occurs if we've forgotten to initialise the
+    // TargetRegistry or we have a bogus target triple.
+    if (!Target) {
+        llvm::errs() << Error;
+        return 1;
+    }
+
+    auto CPU = "generic";
+    auto Features = "";
+
+    llvm::TargetOptions opt;
+    auto TheTargetMachine = Target->createTargetMachine(
+        TargetTriple, CPU, Features, opt, llvm::Reloc::PIC_);
+
+    TheModule->setDataLayout(TheTargetMachine->createDataLayout());
+
+    auto Filename = "output.o";
+    std::error_code EC;
+    llvm::raw_fd_ostream dest(Filename, EC, llvm::sys::fs::OF_None);
+
+    if (EC) {
+        llvm::errs() << "Could not open file: " << EC.message();
+        return 1;
+    }
+
+    llvm::legacy::PassManager pass;
+    auto FileType = llvm::CodeGenFileType::ObjectFile;
+
+    if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
+        llvm::errs() << "TheTargetMachine can't emit a file of this type";
+        return 1;
+    }
+
+    pass.run(*TheModule);
+    dest.flush();
+
+
     std::cout << "finish" << std::endl;
     return 0;
 }
