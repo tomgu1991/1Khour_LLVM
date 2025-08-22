@@ -53,6 +53,10 @@ enum Token {
     tok_if = -6,
     tok_then = -7,
     tok_else = -8,
+
+    // for-expr
+    tok_for = -9,
+    tok_in = -10
 };
 
 static std::string Id; // current id if tok_identifier
@@ -88,6 +92,10 @@ static int gettok() {
         if (Id == "else") {
             return tok_else;
         }
+        if (Id == "for")
+            return tok_for;
+        if (Id == "in")
+            return tok_in;
         return tok_identifier;
     }
     // check number
@@ -223,6 +231,53 @@ static std::unique_ptr<ExprAST> ParseIfExpr() {
                                         std::move(Else));
 }
 
+/// forexpr ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+static std::unique_ptr<ExprAST> ParseForExpr() {
+    getNextToken();  // eat the for.
+
+    if (CurTok != tok_identifier)
+        return LogError("expected identifier after for");
+
+    std::string IdName = Id;
+    getNextToken();  // eat identifier.
+
+    if (CurTok != '=')
+        return LogError("expected '=' after for");
+    getNextToken();  // eat '='.
+
+    auto Start = ParseExpression();
+    if (!Start)
+        return nullptr;
+    if (CurTok != ',')
+        return LogError("expected ',' after for start value");
+    getNextToken();
+
+    auto End = ParseExpression();
+    if (!End)
+        return nullptr;
+
+    // The step value is optional.
+    std::unique_ptr<ExprAST> Step;
+    if (CurTok == ',') {
+        getNextToken();
+        Step = ParseExpression();
+        if (!Step)
+            return nullptr;
+    }
+
+    if (CurTok != tok_in)
+        return LogError("expected 'in' after for");
+    getNextToken();  // eat 'in'.
+
+    auto Body = ParseExpression();
+    if (!Body)
+        return nullptr;
+
+    return std::make_unique<ForExprAST>(IdName, std::move(Start),
+                                         std::move(End), std::move(Step),
+                                         std::move(Body));
+}
+
 /// D: 解析一个基础表达式
 /// primary
 ///   ::= identifierexpr C
@@ -240,6 +295,8 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
             return ParseParenExpr();
         case tok_if:
             return ParseIfExpr();
+        case tok_for:
+            return ParseForExpr();
     }
 }
 
@@ -450,12 +507,13 @@ llvm::Value *IfExprAST::codegen() {
 
     // 获得当前的函数
     llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
-
-    // 创建thenbb，并且直接将thenbb加到funciton的最后
+    TheFunction->print(llvm::errs());
+    // 创建thenbb，并且直接将thenbb加到funciton, 此时thenbb没有前序
     llvm::BasicBlock *ThenBB = llvm::BasicBlock::Create(*TheContext, "then", TheFunction);
     llvm::BasicBlock *ElseBB = llvm::BasicBlock::Create(*TheContext, "else");
     llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(*TheContext, "ifcont");
-    // 创建条件分支IR，并且绑定对应的跳转
+    TheFunction->print(llvm::errs());
+    // 创建条件分支IR，并且绑定对应的跳转，此时thenbb有了前序
     Builder->CreateCondBr(CondV, ThenBB, ElseBB);
     TheFunction->print(llvm::errs());
     // thenbb加入到结构中，虽然此时then还是空的，将thenbb设置为Builder的开始位置，那么后面加入的内容就都在ThenBB里面
@@ -464,14 +522,16 @@ llvm::Value *IfExprAST::codegen() {
     llvm::Value *ThenV = Then->codegen();
     if (!ThenV)
         return nullptr;
-
+    TheFunction->print(llvm::errs());
     Builder->CreateBr(MergeBB);
+    TheFunction->print(llvm::errs());
     // Codegen of 'Then' can change the current block, update ThenBB for the PHI.
     // 这里是担心then本身有递归的其他表达式
     ThenBB = Builder->GetInsertBlock();
 
-    // Emit else block.
+    // Emit else block. else在前边已经有了前序
     TheFunction->insert(TheFunction->end(), ElseBB);
+    TheFunction->print(llvm::errs());
     Builder->SetInsertPoint(ElseBB);
 
     TheFunction->print(llvm::errs());
@@ -496,6 +556,116 @@ llvm::Value *IfExprAST::codegen() {
 
     TheFunction->print(llvm::errs());
     return PN;
+}
+
+// Output for-loop as:
+//   ...
+//   start = startexpr
+//   goto loop
+// loop:
+//   variable = phi [start, loopheader], [nextvariable, loopend]
+//   ...
+//   bodyexpr
+//   ...
+// loopend:
+//   step = stepexpr
+//   nextvariable = variable + step
+//   endcond = endexpr
+//   br endcond, loop, endloop
+// outloop:
+llvm::Value *ForExprAST::codegen() {
+    // Emit the start code first, without 'variable' in scope.
+    // 先处理loop的开始，也就是start部分，这个后面在body也会用到
+    llvm::Value *StartVal = Start->codegen();
+    if (!StartVal)
+        return nullptr;
+
+    // Make the new basic block for the loop header, inserting after current
+    // block.
+    llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
+    TheFunction->print(llvm::errs());
+
+    // loop之前的bb
+    llvm::BasicBlock *PreheaderBB = Builder->GetInsertBlock();
+    // loop自己
+    llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "loop", TheFunction);
+    TheFunction->print(llvm::errs());
+
+    // Insert an explicit fall through from the current block to the LoopBB.
+    // 通过br，将loopbb链接
+    Builder->CreateBr(LoopBB);
+    TheFunction->print(llvm::errs());
+
+    // Start insertion in LoopBB.
+    Builder->SetInsertPoint(LoopBB);
+
+    // Start the PHI node with an entry for Start.
+    // 设置这个phi的值来自两部分
+    llvm::PHINode *Variable = Builder->CreatePHI(llvm::Type::getDoubleTy(*TheContext), 2, VarName);
+    //一个是preheaderbb的StartVal
+    Variable->addIncoming(StartVal, PreheaderBB);
+    TheFunction->print(llvm::errs());
+
+    // Within the loop, the variable is defined equal to the PHI node.  If it
+    // shadows an existing variable, we have to restore it, so save it now.
+    llvm::Value *OldVal = NamedValues[VarName];
+    NamedValues[VarName] = Variable;
+
+    // Emit the body of the loop.  This, like any other expr, can change the
+    // current BB.  Note that we ignore the value computed by the body, but don't
+    // allow an error.
+    if (!Body->codegen())
+        return nullptr;
+
+    // Emit the step value.
+    llvm::Value *StepVal = nullptr;
+    if (Step) {
+        StepVal = Step->codegen();
+        if (!StepVal)
+            return nullptr;
+    } else {
+        // If not specified, use 1.0.
+        StepVal = llvm::ConstantFP::get(*TheContext, llvm::APFloat(1.0));
+    }
+    TheFunction->print(llvm::errs());
+
+    // 处理下一次迭代的值
+    llvm::Value *NextVar = Builder->CreateFAdd(Variable, StepVal, "nextvar");
+
+    // Compute the end condition.
+    llvm::Value *EndCond = End->codegen();
+    if (!EndCond)
+        return nullptr;
+
+    // Convert condition to a bool by comparing non-equal to 0.0.
+    EndCond = Builder->CreateFCmpONE(EndCond, llvm::ConstantFP::get(*TheContext, llvm::APFloat(0.0)), "loopcond");
+    TheFunction->print(llvm::errs());
+
+    // Create the "after loop" block and insert it.
+    llvm::BasicBlock *LoopEndBB = Builder->GetInsertBlock();
+    llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "afterloop", TheFunction);
+    TheFunction->print(llvm::errs());
+
+    // Insert the conditional branch into the end of LoopEndBB.
+    Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+    TheFunction->print(llvm::errs());
+
+    // Any new code will be inserted in AfterBB.
+    Builder->SetInsertPoint(AfterBB);
+
+    // Add a new entry to the PHI node for the backedge.
+    Variable->addIncoming(NextVar, LoopEndBB);
+    TheFunction->print(llvm::errs());
+
+    // Restore the unshadowed variable.
+    if (OldVal)
+        NamedValues[VarName] = OldVal;
+    else
+        NamedValues.erase(VarName);
+
+    TheFunction->print(llvm::errs());
+    // for expr always returns 0.0.
+    return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*TheContext));
 }
 
 /// 函数签名：就是一个类型表示，所以是返回值+参数类型的组合
@@ -676,7 +846,11 @@ int main() {
             "   if x < 3 then"
             "       squire(x)"
             "   else"
-            "       fib (x-1) + squire(x)";
+            "       fib (x-1) + squire(x)"
+            "extern putchard(char);"
+            "def printstar(n)"
+            "   for i=1, i < n, 2.0 in"
+            "       putchard(42)";
     getNextToken(); // 启动
     // Make the module, which holds all the code.
     InitializeModuleAndManagers();
