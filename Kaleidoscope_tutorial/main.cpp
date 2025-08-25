@@ -62,7 +62,11 @@ enum Token {
 
     // for-expr
     tok_for = -9,
-    tok_in = -10
+    tok_in = -10,
+
+    // 自定义操作符号
+    tok_binary = -11,
+    tok_unary = -12,
 };
 
 static std::string Id; // current id if tok_identifier
@@ -102,10 +106,14 @@ static int gettok() {
             return tok_for;
         if (Id == "in")
             return tok_in;
+        if (Id == "binary")
+            return tok_binary;
+        if (Id == "unary")
+            return tok_unary;
         return tok_identifier;
     }
     // check number
-    if (isdigit(LastChar)) {
+    if (isdigit(LastChar) || LastChar == '.') {
         std::string NumStr;
         do {
             NumStr += LastChar;
@@ -306,6 +314,22 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
     }
 }
 
+/// unary
+///   ::= primary
+///   ::= '!' unary
+static std::unique_ptr<ExprAST> ParseUnary() {
+    // If the current token is not an operator, it must be a primary expr.
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+        return ParsePrimary();
+
+    // If this is a unary operator, read it.
+    int Opc = CurTok;
+    getNextToken();
+    if (auto Operand = ParseUnary())
+        return std::make_unique<UnaryExprAST>(Opc, std::move(Operand));
+    return nullptr;
+}
+
 /// E: 解析二元表达式，这个会复杂一些，因为涉及到优先级
 /// 所以，我们先注册符号的优先级，在解析的过程中，一定是形如 Lhs op Rhs [op2 T]
 /// （1）如果后面的符号op2优先级高，那么就以当前的Rhs，作为下一个的Lhs进行，结果一起作为结果
@@ -338,7 +362,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int CurExprPrec, std::unique_ptr<E
 
         int BinOp = CurTok;
         getNextToken(); // 跳过下一个符号
-        auto RHS = ParsePrimary();
+        auto RHS = ParseUnary();
         if (!RHS) return nullptr;
         std::cout << "[debug: ] ParseBinOpRHS, " << RHS->printToStr() << std::endl;
         // 现在有了lhs，rhs，那么要看再下一个了这决定了RHS怎么处理
@@ -362,20 +386,61 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int CurExprPrec, std::unique_ptr<E
 ///   ::= primary binoprhs
 ///
 static std::unique_ptr<ExprAST> ParseExpression() {
-    auto LHS = ParsePrimary();
+    auto LHS = ParseUnary();
     if (!LHS)
         return nullptr;
     return ParseBinOpRHS(0, std::move(LHS));
 }
 
 /// G: 函数声明
-/// prototype
-///   ::= id '(' id* ')'
+// prototype ::= id '(' id* ')' // 函数签名
+//           ::= binary LETTER number? (id, id)
+//           ::= unary LETTER number? (id)
 static std::unique_ptr<PrototypeAST> ParsePrototype() {
-    if (CurTok != tok_identifier) return LogErrorP("Expected function name in prototype");
-    std::string FnName = Id;
-    getNextToken();
-    if (CurTok != '(') return LogErrorP("expected ')'");
+    std::string FnName;
+
+    unsigned Kind = 0;  // 0 = identifier, 1 = unary, 2 = binary.
+    unsigned BinaryPrecedence = 30; // 默认的优先级
+
+    switch (CurTok) {
+        default:
+            return LogErrorP("Expected function name in prototype");
+        case tok_identifier:
+            FnName = Id;
+            Kind = 0;
+            getNextToken(); // 跳过当前Id,取下一个
+            break;
+        case tok_unary:
+            getNextToken();
+            if (!isascii(CurTok))
+                return LogErrorP("Expected unary operator");
+            FnName = "unary";
+            FnName += (char)CurTok;
+            Kind = 1;
+            getNextToken(); // 函数名就是unary+op
+            break;
+        case tok_binary:
+            getNextToken();
+            if (!isascii(CurTok))
+                return LogErrorP("Expected binary operator");
+            FnName = "binary";
+            FnName += (char)CurTok;
+            Kind = 2;
+            getNextToken();
+
+            // Read the precedence if present.
+            if (CurTok == tok_number) {
+                if (Number < 1 || Number > 100)
+                    return LogErrorP("Invalid precedence: must be 1..100");
+                BinaryPrecedence = (unsigned)Number;
+                getNextToken();
+            }
+            break;
+    }
+
+    if (CurTok != '(')
+        return LogErrorP("Expected '(' in prototype");
+
     std::vector<std::string> ArgNames;
     while (getNextToken() == tok_identifier)
         ArgNames.push_back(Id);
@@ -383,9 +448,14 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
         return LogErrorP("Expected ')' in prototype");
 
     // success.
-    getNextToken(); // eat ')'.
+    getNextToken();  // eat ')'.
 
-    return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+    // Verify right number of names for operator.
+    if (Kind && ArgNames.size() != Kind)
+        return LogErrorP("Invalid number of operands for operator");
+
+    return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0,
+                                           BinaryPrecedence);
 }
 /// H: 函数定义
 /// definition ::= 'def' prototype expression
@@ -431,6 +501,7 @@ static std::unique_ptr<llvm::LLVMContext> TheContext; // 上下文信息，数�
 static std::unique_ptr<llvm::Module> TheModule; // 组织函数和全局变量
 static std::unique_ptr<llvm::IRBuilder<>> Builder; // 组织IR指令
 static std::unordered_map<std::string, llvm::Value *> NamedValues; // 记录当前符号表
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos; // 记录所有的函数定义
 
 /// 优化
 static std::unique_ptr<llvm::FunctionPassManager> TheFPM;
@@ -443,6 +514,21 @@ static std::unique_ptr<llvm::StandardInstrumentations> TheSI;
 
 llvm::Value *LogErrorV(const char *Str) {
     LogError(Str);
+    return nullptr;
+}
+
+llvm::Function *getFunction(std::string Name) {
+    // First, see if the function has already been added to the current module.
+    if (auto *F = TheModule->getFunction(Name))
+        return F;
+
+    // If not, check whether we can codegen the declaration from some existing
+    // prototype.
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+
+    // If no existing prototype exists, return null.
     return nullptr;
 }
 
@@ -480,8 +566,14 @@ llvm::Value *BinaryExprAST::codegen() {
             return Builder->CreateUIToFP(L, llvm::Type::getDoubleTy(*TheContext),
                                          "booltmp");
         default:
-            return LogErrorV("invalid binary operator");
+            break;
     }
+    // 可能是一个自己定义的操作符号
+    llvm::Function *F = getFunction(std::string("binary") + Op);
+    if (!F)
+        LogErrorV("binary operator not found! " + Op);
+    llvm::Value *Ops[2] = {L, R};
+    return Builder->CreateCall(F, Ops, "calltmp");
 }
 
 /// 处理函数调用
@@ -608,7 +700,7 @@ llvm::Value *ForExprAST::codegen() {
     // Start the PHI node with an entry for Start.
     // 设置这个phi的值来自两部分
     llvm::PHINode *Variable = Builder->CreatePHI(llvm::Type::getDoubleTy(*TheContext), 2, VarName);
-    //一个是preheaderbb的StartVal
+    // 一个是preheaderbb的StartVal
     Variable->addIncoming(StartVal, PreheaderBB);
     TheFunction->print(llvm::errs());
 
@@ -674,6 +766,18 @@ llvm::Value *ForExprAST::codegen() {
     return llvm::Constant::getNullValue(llvm::Type::getDoubleTy(*TheContext));
 }
 
+llvm::Value *UnaryExprAST::codegen() {
+    llvm::Value *OperandV = Operand->codegen();
+    if (!OperandV)
+        return nullptr;
+
+    llvm::Function *F = getFunction(std::string("unary") + Opcode);
+    if (!F)
+        return LogErrorV("Unknown unary operator");
+
+    return Builder->CreateCall(F, OperandV, "unop");
+}
+
 /// 函数签名：就是一个类型表示，所以是返回值+参数类型的组合
 llvm::Function *PrototypeAST::codegen() {
     // Make the function type:  double(double,double) etc.
@@ -693,14 +797,17 @@ llvm::Function *PrototypeAST::codegen() {
 }
 
 llvm::Function *FunctionAST::codegen() {
+    auto &P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+    llvm::Function *TheFunction = getFunction(P.getName());
+
     // First, check for an existing function from a previous 'extern' declaration.
-    llvm::Function *TheFunction = TheModule->getFunction(Proto->getName());
-
-    if (!TheFunction)
-        TheFunction = Proto->codegen();
-
     if (!TheFunction)
         return nullptr;
+
+    // If this is an operator, install it.
+    if (P.isBinaryOp())
+        BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
 
     // Create a new basic block to start insertion into.
     llvm::BasicBlock *BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
@@ -726,6 +833,9 @@ llvm::Function *FunctionAST::codegen() {
 
     // Error reading body, remove function.
     TheFunction->eraseFromParent();
+
+    if (P.isBinaryOp())
+        BinopPrecedence.erase(P.getOperatorName());
     return nullptr;
 }
 
@@ -856,7 +966,24 @@ int main() {
             "extern putchard(char);"
             "def printstar(n)"
             "   for i=1, i < n, 2.0 in"
-            "       putchard(42)";
+            "       putchard(42);"
+            "def unary!(v)"
+            "   if v then"
+            "       0"
+            "   else"
+            "       1;"
+            "def binary| 5(L R)"
+            "   if L then"
+            "       1"
+            "   else if R then"
+            "       1"
+            "   else"
+            "       0;"
+            "extern printd(a);"
+            "def testunary(a)"
+            "   !a;"
+            "def testbinary(a b)"
+            "   a | b;";
     getNextToken(); // 启动
     // Make the module, which holds all the code.
     InitializeModuleAndManagers();
