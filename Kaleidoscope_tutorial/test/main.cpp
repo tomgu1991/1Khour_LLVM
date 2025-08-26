@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
     std::cout << "foo(x,y)=" << foo(x, y) << std::endl;
     std::cout << "fib(2)=" << fib(2) << std::endl;
     std::cout << "fib(5)" << fib(5) << std::endl; // 5*5 + 4*4 + 3*3 + 2*2 = 54
-    printstar(100);
+    printstar(4);
     std::cout << std::endl;
     std::cout << "!2 = " << testunary(2);
     std::cout << std::endl;

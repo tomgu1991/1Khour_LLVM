@@ -754,19 +754,16 @@ llvm::Value *IfExprAST::codegen() {
 //   ...
 //   start = startexpr
 //   store start -> var
-//   goto loop
-// loop:
-//   ...
-//   bodyexpr
-//   ...
-// loopend:
-//   step = stepexpr
-//   endcond = endexpr
-//
+//   goto compare
+// compare:
+// endcond = endexpr
+//   br endcond, body, endloop
+// body:
+//   body expr
 //   curvar = load var
 //   nextvar = curvar + step
 //   store nextvar -> var
-//   br endcond, loop, endloop
+//   br compare
 // outloop:
 llvm::Value *ForExprAST::codegen() {
     llvm::Function *TheFunction = Builder->GetInsertBlock()->getParent();
@@ -779,26 +776,40 @@ llvm::Value *ForExprAST::codegen() {
     llvm::Value *StartVal = Start->codegen();
     if (!StartVal)
         return nullptr;
-
     // Store the value into the alloca.
     Builder->CreateStore(StartVal, Alloca);
-
-    // loop自己
-    llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "loop", TheFunction);
-    TheFunction->print(llvm::errs());
-
-    // Insert an explicit fall through from the current block to the LoopBB.
-    // 通过br，将loopbb链接
-    Builder->CreateBr(LoopBB);
-    TheFunction->print(llvm::errs());
-
-    // Start insertion in LoopBB.
-    Builder->SetInsertPoint(LoopBB);
-
     // Within the loop, the variable is defined equal to the PHI node.  If it
     // shadows an existing variable, we have to restore it, so save it now.
     llvm::AllocaInst *OldVal = NamedValues[VarName];
     NamedValues[VarName] = Alloca;
+    TheFunction->print(llvm::errs());
+
+    // 创建compare
+    llvm::BasicBlock *LoopCompare = llvm::BasicBlock::Create(*TheContext, "compare", TheFunction);
+    // loop自己
+    llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(*TheContext, "loop", TheFunction);
+    // Create the "after loop" block and insert it.
+    llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "afterloop", TheFunction);
+    TheFunction->print(llvm::errs());
+
+    Builder->CreateBr(LoopCompare);
+    TheFunction->print(llvm::errs());
+
+    Builder->SetInsertPoint(LoopCompare);
+    // Compute the end condition.
+    llvm::Value *EndCond = End->codegen();
+    if (!EndCond)
+        return nullptr;
+    // Convert condition to a bool by comparing non-equal to 0.0.
+    EndCond = Builder->CreateFCmpONE(
+        EndCond, llvm::ConstantFP::get(*TheContext, llvm::APFloat(0.0)), "loopcond");
+    // Insert the conditional branch into the end of LoopEndBB.
+    Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
+    TheFunction->print(llvm::errs());
+
+
+    // Start insertion in LoopBB.
+    Builder->SetInsertPoint(LoopBB);
 
     // Emit the body of the loop.  This, like any other expr, can change the
     // current BB.  Note that we ignore the value computed by the body, but don't
@@ -817,28 +828,13 @@ llvm::Value *ForExprAST::codegen() {
         StepVal = llvm::ConstantFP::get(*TheContext, llvm::APFloat(1.0));
     }
     TheFunction->print(llvm::errs());
-
-    // Compute the end condition.
-    llvm::Value *EndCond = End->codegen();
-    if (!EndCond)
-        return nullptr;
-
     // Reload, increment, and restore the alloca.  This handles the case where
     // the body of the loop mutates the variable.
     llvm::Value *CurVar = Builder->CreateLoad(Alloca->getAllocatedType(), Alloca, VarName.c_str());
     llvm::Value *NextVar = Builder->CreateFAdd(CurVar, StepVal, "nextvar");
     Builder->CreateStore(NextVar, Alloca);
+    Builder->CreateBr(LoopCompare);
 
-    // Convert condition to a bool by comparing non-equal to 0.0.
-    EndCond = Builder->CreateFCmpONE(
-        EndCond, llvm::ConstantFP::get(*TheContext, llvm::APFloat(0.0)), "loopcond");
-    TheFunction->print(llvm::errs());
-
-    // Create the "after loop" block and insert it.
-    llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(*TheContext, "afterloop", TheFunction);
-
-    // Insert the conditional branch into the end of LoopEndBB.
-    Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
 
     // Any new code will be inserted in AfterBB.
     Builder->SetInsertPoint(AfterBB);
