@@ -32,9 +32,11 @@ prototype ::= id '(' id* ')' // 函数签名
 expression ::= unary binoprhs// 表达式，递归形式
 binoprhs ::= ('+' unary)* // 二元右侧，对于自定义的操作符，那么就可以认为op+expr相当于一个函数调用
 unary ::= primary | '!'unary 
-primary ::= identifierexpr | numberexpr | parenexpr | ifexpr | forexpr
+primary ::= identifierexpr | numberexpr | parenexpr | ifexpr | forexpr | varexpr
 ifexpr ::= 'if' expression 'then' expression 'else' expression
 forexpr ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+varexpr ::= 'var' identifier ('=' expression)?
+                (',' identifier ('=' expression)?)* 'in' expression
 
 identifierexpr ::= identifier | identifier '(' expression* ')'
 numberexpr ::= number

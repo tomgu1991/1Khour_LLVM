@@ -18,6 +18,8 @@ extern "C" {
         fprintf(stderr, "%f\n", X);
         return 0;
     }
+    double mysquire(double);
+    double specialsum(double x);
 }
 
 int main(int argc, char **argv) {
@@ -38,5 +40,13 @@ int main(int argc, char **argv) {
     std::cout << std::endl;
     std::cout << "testbinary(0, 0) = " << testbinary(0, 0);
     std::cout << std::endl;
+    std::cout << mysquire(1) << std::endl;
+    std::cout << mysquire(2) << std::endl;
+    std::cout << mysquire(3) << std::endl;
+    std::cout << mysquire(4) << std::endl;
+    std::cout << mysquire(5) << std::endl;
+    std::cout << mysquire(6) << std::endl;
+    std::cout << specialsum(3.0) << std::endl;
+    std::cout << specialsum(6.0) << std::endl;
     return 0;
 }
