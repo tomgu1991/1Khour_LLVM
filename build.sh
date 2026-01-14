@@ -17,7 +17,7 @@ if [ ! -d build ]; then
     mkdir $BUILD_DIR
 fi
 
-cmake -S $LLVM_ROOT -B $BUILD_DIR -G "Ninja" -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;" \
+cmake -S $LLVM_ROOT -B $BUILD_DIR -G "Ninja" -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra;" \
   -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLLVM_INSTALL_UTILS=ON \
   -DLLVM_ENABLE_RUNTIMES=compiler-rt
 cd $BUILD_DIR
