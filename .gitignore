@@ -3,3 +3,5 @@ llvm-project
 profiles
 build
 install
+.cache
+.vscode

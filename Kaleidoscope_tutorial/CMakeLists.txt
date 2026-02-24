@@ -39,13 +39,17 @@ else()
 endif()
 
 message(STATUS "[+] Target ${TARGET_ARCH}")
-llvm_map_components_to_libnames(llvm_libs Core Analysis Passes Support
-        AArch64CodeGen
-        AArch64AsmParser
-#        AArch64AsmPrinter
-        AArch64Desc
-        AArch64Disassembler
-        AArch64Info
-        AArch64Utils
-)
+
+# Build component list based on target architecture
+set(LLVM_COMPONENTS Core Analysis Passes Support)
+
+if(TARGET_ARCH STREQUAL "X86")
+    list(APPEND LLVM_COMPONENTS X86CodeGen X86AsmParser X86Desc X86Disassembler X86Info)
+elseif(TARGET_ARCH STREQUAL "ARM")
+    list(APPEND LLVM_COMPONENTS ARMCodeGen ARMAsmParser ARMDesc ARMDisassembler ARMInfo ARMUtils)
+elseif(TARGET_ARCH STREQUAL "AArch64")
+    list(APPEND LLVM_COMPONENTS AArch64CodeGen AArch64AsmParser AArch64Desc AArch64Disassembler AArch64Info AArch64Utils)
+endif()
+
+llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 target_link_libraries(Kal_lang ${llvm_libs})

@@ -1158,7 +1158,7 @@ int main() {
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
 
-    auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+    llvm::Triple TargetTriple(llvm::sys::getDefaultTargetTriple());
     TheModule->setTargetTriple(TargetTriple);
     std::string Error;
     auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
