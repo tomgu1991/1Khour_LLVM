@@ -2,6 +2,10 @@
 
 set -x
 
+# export LDFLAGS="-fuse-ld=lld"
+# export CC=clang
+# export CXX=clang++
+
 CUR_DIR=`pwd`
 
 #git clone git@github.com:llvm/llvm-project.git
